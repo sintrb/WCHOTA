@@ -1,0 +1,22 @@
+# Python bytecode and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Generated OTA images and conversion outputs
+APP.bin
+*.bin
+
+# Local command output and temporary files
+a.txt
+*.log
+*.tmp
+*.bak
+
+# OMX runtime state
+.omx/
+
+# macOS metadata
+.DS_Store

@@ -1,0 +1,405 @@
+﻿<!DOCTYPE html>
+<html>
+
+<head>
+	<meta charset="UTF-8">
+	<title>WCH Web OTA</title>
+	<meta name="viewport" content="width=\, initial-scale=1.0">
+
+	<script>
+		// 參考 :
+		// https://blog.csdn.net/qq_44628595/article/details/117028837
+		// https://blog.csdn.net/qq_43193513/article/details/126708168
+		// https://blog.csdn.net/zoomdy/article/details/111627772
+		// https://novelbits.io/web-bluetooth-getting-started-guide/
+		// https://googlechrome.github.io/samples/web-bluetooth/read-descriptors.html
+		// https://github.com/WebBluetoothCG/registries/blob/master/gatt_blocklist.txt    // UUID 服務黑名單
+
+		var startAddr = 0x1000;
+		var fileArray;
+		var realFileArray;
+		var mtu = 247;
+		var dataLen = mtu-3;
+
+
+		window.onload = function(){
+
+		    document.getElementById('fileInput').addEventListener('change', 
+			function selectedFileChanged(){
+
+				const reader = new FileReader();
+				reader.onload = function fileReadCompleted(){
+					fileArray = new Uint8Array(reader.result);
+					// console.log(b.length);					
+					document.getElementById('fileSize').innerText = fileArray.length;
+
+
+					realFileArray = fileArray.slice(startAddr);
+
+					var fileImageType = (realFileArray[7] << 24) | (realFileArray[6] << 16) | (realFileArray[5] << 8) | realFileArray[4];
+
+					if((fileImageType > 0x38000) || (fileImageType > 0x4000 && fileImageType < 0x10000)){
+						document.getElementById('fileImageType').innerText =  'A';
+					}else if(fileImageType < 0x38000){
+						document.getElementById('fileImageType').innerText =  'B';
+					}else{
+						document.getElementById('fileImageType').innerText =  '未知';
+					}
+				};
+				reader.readAsArrayBuffer(this.files[0]);
+			});
+		};
+
+
+		var time = 0;
+		var isStart = 0;
+		setInterval(function(){
+			if(isStart !== 0){
+			    time++;
+			    document.getElementById('time').innerText =  (time % 10 == 0 ? (time/10) + '.0' : (time/10)) + ' 秒';
+			}
+		},100);
+		
+
+		async function startOTAUpdate(){
+
+			console.log('Hello');
+
+		     if (!navigator.bluetooth) {
+                     // 不支持 Web Bluetooth0
+		         alert('此瀏覽器不支持藍牙，請換個瀏覽器試試。');
+		         return;
+		     }
+
+			let device = await navigator.bluetooth.requestDevice({
+			  acceptAllDevices: true,    // 沒有過濾器, 搜尋所有附近的藍牙設備。
+			  // filters: [{
+			  //   namePrefix: 'simple' // 只要是1代(不管版本)都搜尋
+			  // }],
+			  optionalServices: [
+			  	0xFEE0,
+			  	0xFEE1
+			  	]
+			});
+
+			isStart = 1;
+
+			device.addEventListener('gattserverdisconnected', onDisconnected); // 斷線回調
+
+			let server = await device.gatt.connect(); // 連線
+
+			let otaService   = await server.getPrimaryService(0xFEE0); // "根" 服務的 UUID
+			let otaServiceRW = await otaService.getCharacteristic(0xFEE1); // "讀+寫" 服務的 UUID
+
+			// -----------------------------------------------------------------------------------------------------
+			// 發送 ImageInfo 命令，以讀取硬件訊息
+			await otaServiceRW.writeValue(new Uint8Array([0x84, 0x12]));
+
+			// 延遲
+			await delay(500);
+
+			// 讀取硬件訊息			
+			var readData = new Uint8Array((await otaServiceRW.readValue()).buffer);
+
+			// 顯示封包內容
+			var readDataTxt = '';
+			for(var i=0; i < 20; i++){
+				readDataTxt += readData[i].toString(16) + ' ';
+			}
+			document.getElementById('readDataTxt').innerText = readDataTxt;	
+			
+			// 判斷芯片類型
+			var chipType = '';
+			if(readData[7]==0x73 && readData[8]==0x00){ chipType = 'CH573'; }
+			else if(readData[7]==0x79 && readData[8]==0x00){ chipType = 'CH579'; }
+			else if(readData[7]==0x83 && readData[8]==0x00){ chipType = 'CH583'; }
+			else if(readData[7]==0x08 && readData[8]==0x02){ chipType = 'CH32V208'; }
+			else if(readData[7]==0x08 && readData[8]==0xF2){ chipType = 'CH32F208'; }
+			else { chipType = '未知芯片'; }
+			document.getElementById('chipType').innerText = chipType;
+
+			// 判斷當前 Image
+			if(readData[0]==0x01){ imageType = 'A'; }
+			else if(readData[0]==0x02){ imageType = 'B'; }
+			else{ imageType = '未知類型' }
+			document.getElementById('imageType').innerText = imageType;
+
+			// 最大可支持 Image 大小
+			var imageMaxSize = ((readData[4] & 0xff) << 24) | ((readData[3] & 0xff) << 16) | ((readData[2] & 0xff) << 8) | (readData[1] & 0xff);
+			document.getElementById('imageMaxSize').innerText = imageMaxSize;
+			
+			var useSize = Math.round((fileArray.length / imageMaxSize ) * 100 ) + ' %';
+			document.getElementById('useSize').innerText = useSize;
+
+			var freeSize = imageMaxSize - fileArray.length;
+			document.getElementById('freeSize').innerText = freeSize;
+
+			// Block 大小
+			var blockSize = (readData[6] & 0xff) * 256 + (readData[5] & 0xff);
+			document.getElementById('blockSize').innerText = blockSize;
+			// -----------------------------------------------------------------------------------------------------
+
+			// total : 缓冲区实际大小为文件大小减去擦除起始地址
+			var total = fileArray.length - startAddr;
+			var nBlocks = (Math.round((total+(blockSize-1))/blockSize)) & 0xFF;			
+			var nBlocksL = nBlocks;
+			var nBlocksH = (nBlocks >> 8) & 0xFF;
+			document.getElementById('total').innerText = total;
+			document.getElementById('nBlocks').innerText = (nBlocks & 0xffff); // erase nBlocks
+
+
+			// -----------------------------------------------------------------------------------------------------
+
+			document.getElementById('finish').innerText = '0 %';
+
+			// -----------------------------------------------------------------------------------------------------
+			// 清除 Flash
+
+			document.getElementById('eraseReturn').innerText = '0 %';
+
+			// 發送 開始清除 命令
+			await otaServiceRW.writeValue(new Uint8Array([0x81, 0x00, ((startAddr/16) & 0xFF), (((startAddr/16)>>8) & 0xFF), nBlocksL, nBlocksH])); // 只適用於 CH583, CH573
+
+			// 延遲
+			for(var i=1; i <= 9; i++){
+				await delay(500);
+				document.getElementById('eraseReturn').innerText = (i * 10) + ' %';
+			}		
+			
+			// 接收回傳資料
+			var eraseReturn = new Uint8Array((await otaServiceRW.readValue()).buffer);
+
+			if(eraseReturn.length != 0 && eraseReturn[0] == 0){
+				document.getElementById('eraseReturn').innerText = '100 %';
+				document.getElementById('finish').innerText = '33 %';
+			}else{
+				document.getElementById('eraseReturn').innerText = '清除失敗 : length=' + eraseReturn.length + ', [' + eraseReturn[0]+' ], [' + eraseReturn[1]+' ]';
+				return;
+			}
+
+			// -----------------------------------------------------------------------------------------------------
+			// 寫入 Flash
+
+			var offset=0;
+			while(offset < realFileArray.length){
+
+				//有效数据的长度
+				var programmeLength = Math.min(dataLen-4, realFileArray.length - offset);
+
+				// var programmeLength = 240;
+
+				var addr = offset + startAddr;
+
+				const bufferW = new Uint8Array(programmeLength+4);
+				
+				bufferW[0] = 0x80;                        // 寫入標識
+				bufferW[1] = programmeLength;             // 頭包佔了 4 個 byte，所以要扣除
+				bufferW[2] = (addr/16) & 0xFF;            // 只適用於 CM583
+				bufferW[3] = ((addr/16) >> 8) & 0xFF;     // 只適用於 CM583
+
+				var b = realFileArray.slice(offset, offset + programmeLength);
+
+				for(var i =0; i < b.length; i++){
+					bufferW[i+4] = b[i];
+				}
+
+				// 寫入藍牙
+				await otaServiceRW.writeValue(bufferW);
+
+				document.getElementById('writeFlash').innerText = Math.round((offset / realFileArray.length) * 100) + ' %';
+
+				offset += programmeLength;
+			}
+			document.getElementById('writeFlash').innerText = '100 %';
+			document.getElementById('finish').innerText = '66 %';
+
+			// -----------------------------------------------------------------------------------------------------
+			// 校驗 Flash
+
+			var vIndex=0;
+	        while (vIndex < realFileArray.length){
+
+	        	var verifyLength = Math.min(dataLen-4, realFileArray.length - vIndex);
+
+	        	// var verifyLength = 240;
+
+				var addr = vIndex + startAddr;
+
+				var bufferW = new Uint8Array(verifyLength+4);
+				
+				bufferW[0] = 0x82;                        // 寫入標識
+				bufferW[1] = verifyLength;                // 頭包佔了 4 個 byte，所以要扣除
+				bufferW[2] = (addr/16) & 0xFF;            // 只適用於 CM583
+				bufferW[3] = ((addr/16) >> 8) & 0xFF;     // 只適用於 CM583
+
+				var b = realFileArray.slice(vIndex, vIndex + verifyLength);
+
+				for(var i =0; i < b.length; i++){
+					bufferW[i+4] = b[i];
+				}
+
+				// 寫入藍牙
+				await otaServiceRW.writeValue(bufferW);
+
+				document.getElementById('verifyFlash').innerText = Math.round((vIndex / realFileArray.length) * 100) + ' %';
+
+	        	vIndex += verifyLength;
+	        }
+	        document.getElementById('verifyFlash').innerText = '100 %';
+	        document.getElementById('finish').innerText = '95 %';
+
+
+	        // -----------------------------------------------------------------------------------------------------
+	        // 延遲
+			await delay(2000);
+
+
+			// 接收回傳資料
+			var verifyReturn = new Uint8Array((await otaServiceRW.readValue()).buffer);
+
+			if(verifyReturn.length != 0 && verifyReturn[0] === 0){
+				document.getElementById('finish').innerText = '99 %';
+			}else{
+
+				if(verifyReturn.length === 2){
+					document.getElementById('finish').innerText = '校驗失敗 : length=' + verifyReturn.length + ', [' + verifyReturn[0]+' ], [' + verifyReturn[1]+' ]';
+				}else{
+					document.getElementById('finish').innerText = '校驗失敗 : length=' + verifyReturn.length;
+				}			
+				isStart = 0;
+				return;
+			}
+
+
+
+
+			// -----------------------------------------------------------------------------------------------------
+			// 發送完成信號
+
+			document.getElementById('finish').innerText = '100 %';
+			isStart = 0;
+
+	        var endW = new Uint8Array(20);
+	        endW[0] = 0x83;
+	        endW[1] = 18;
+
+	        otaServiceRW.writeValue(endW); // 不等待	        
+
+	        // -----------------------------------------------------------------------------------------------------
+
+	        // 斷開藍牙連接
+			// device.gatt.disconnect(); // 不等待
+
+			console.log('End');
+		}
+
+		function delay(ms) {
+		    return new Promise(resolve => setTimeout(resolve, ms));
+		}
+
+
+
+
+
+		
+
+		function doubleByte2Short(byteH, byteL){
+			var sign = byteH & (1 << 7);
+			var n = ((byteH << 8) | byteL);
+			if (sign) {
+			   n |= 0xFFFF0000;  // fill in most significant bits with 1's
+			}
+			return n;
+		}
+
+		function onDisconnected(event) {
+			isStart = 0;
+			const device = event.target;
+			alert('設備 : ' + device.name + ' 已经断开连接');
+		}
+
+						
+	</script>
+
+</head>
+<body>
+
+	<center>
+
+
+		<h3>WCH Web OTA</h3>
+		<hr>
+
+
+		<br>
+		<input id="fileInput" type="file" />
+		<br>
+		<br>
+		<table border="1">
+			<tr><th width="200px">說明</th><th width="500px">燒錄檔案</th></tr>
+			
+			<tr><td>&emsp;文件大小</td><td id="fileSize" style="text-align: center;"></td></tr>
+			<tr><td>&emsp;Image 類型</td><td id="fileImageType" style="text-align: center;"></td></tr>
+
+		</table>
+
+
+		<br>
+		<hr>
+
+
+		<br>
+		<button onclick="startOTAUpdate()" class="btn">連線</button>		
+		<br>
+		<br>
+
+		<table border="1">
+			<tr><th width="200px">說明</th><th width="500px">設備資料</th></tr>
+			
+			<tr><td>&emsp;回傳封包</td><td id="readDataTxt" style="text-align: center;"></td></tr>
+			<tr><td>&emsp;芯片類型</td><td id="chipType" style="text-align: center;"></td></tr>
+			<tr><td>&emsp;當前 Image 類型</td><td id="imageType" style="text-align: center;"></td></tr>			
+			<tr><td>&emsp;最大可支持 Image 大小</td><td id="imageMaxSize" style="text-align: center;"></td></tr>
+			<tr><td>&emsp;Block 大小</td><td id="blockSize" style="text-align: center;"></td></tr>
+			<tr><td>&emsp;已使用空間</td><td id="useSize" style="text-align: center;"></td></tr>
+			<tr><td>&emsp;剩餘空間</td><td id="freeSize" style="text-align: center;"></td></tr>
+
+		</table>
+
+		<br>
+		<hr>		
+		<br>
+
+		<table border="1">
+			<tr><th width="200px">說明</th><th width="500px">設備狀態</th></tr>
+			
+			<tr><td>&emsp;缓冲区大小</td><td id="total" style="text-align: center;"></td></tr>
+			<tr><td>&emsp;Block 數量</td><td id="nBlocks" style="text-align: center;"></td></tr>
+			<tr><td>&emsp;清除 Flash</td><td id="eraseReturn" style="text-align: center;"></td></tr>
+			<tr><td>&emsp;寫入 Flash</td><td id="writeFlash" style="text-align: center;"></td></tr>
+			<tr><td>&emsp;校驗 Flash</td><td id="verifyFlash" style="text-align: center;"></td></tr>
+			<tr><td>&emsp;總進度</td><td id="finish" style="text-align: center;"></td></tr>
+			<tr><td>&emsp;總耗時</td><td id="time" style="text-align: center;"></td></tr>
+		</table>
+
+		
+
+
+		<br>
+		<br>
+
+
+		
+
+
+		<br>
+		<br>
+		<br>
+		
+		
+
+	</center>
+
+
+</body>
+</html>
