@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import math
 import sys
+import time
 from pathlib import Path
 from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
@@ -23,6 +24,7 @@ SERVICE_UUID = "0000fee0-0000-1000-8000-00805f9b34fb"
 CHAR_UUID = "0000fee1-0000-1000-8000-00805f9b34fb"
 START_ADDR = 0x1000
 DEFAULT_MTU = 247
+DEFAULT_SCAN_TIMEOUT = 8.0
 
 
 def load_image(path: Path) -> bytes:
@@ -42,20 +44,72 @@ def chip_name(data: bytes) -> str:
     return ids.get((data[7], data[8]), "unknown") if len(data) > 8 else "unknown"
 
 
-async def find_device(selector: str):
-    print("Scanning BLE devices (8s)...", flush=True)
-    selector_l = selector.lower()
+async def discover_devices(timeout: float = DEFAULT_SCAN_TIMEOUT):
+    print(f"Scanning BLE devices ({timeout:g}s)...", flush=True)
+    discovered = await BleakScanner.discover(timeout=timeout, return_adv=True)
+    devices = [(device, getattr(advertisement, "rssi", None))
+               for device, advertisement in discovered.values()]
+    return sorted(devices, key=lambda item: (
+        item[1] is None,
+        -(item[1] if item[1] is not None else 0),
+    ))
 
+
+async def find_device(selector: str, timeout: float, name_prefix: str | None = None):
+    print(f"Scanning BLE devices ({timeout:g}s)...", flush=True)
+    selector_l = selector.lower()
+    prefix_l = name_prefix.lower() if name_prefix else None
     def matches(device, advertisement):
         name = device.name or advertisement.local_name or ""
-        address = device.address or ""
-        return selector_l in f"{name} {address}".lower()
+        return ((prefix_l is None or name.lower().startswith(prefix_l)) and
+                selector_l in f"{name} {device.address or ''}".lower())
 
-    device = await BleakScanner.find_device_by_filter(matches, timeout=8.0)
+    device = await BleakScanner.find_device_by_filter(matches, timeout=timeout)
     print("Matching target device...", flush=True)
     if device is None:
-        raise RuntimeError(f"no BLE device matched {selector!r} within 8 seconds")
+        raise RuntimeError(f"no BLE device matched {selector!r} within {timeout:g} seconds")
     return device
+
+
+def print_devices(devices):
+    for index, (device, rssi) in enumerate(devices, 1):
+        signal = f", RSSI={rssi} dBm" if rssi is not None else ""
+        print(f"{index}. {device.name or '<unnamed>'} ({device.address}{signal})")
+
+
+async def select_device(timeout: float, name_prefix: str | None = None):
+    devices = await discover_devices(timeout)
+    if name_prefix:
+        prefix_l = name_prefix.lower()
+        devices = [(device, rssi) for device, rssi in devices
+                   if (device.name or "").lower().startswith(prefix_l)]
+    if not devices:
+        raise RuntimeError(f"no BLE devices found within {timeout:g} seconds")
+    print_devices(devices)
+    while True:
+        try:
+            value = input("Select device number (q/0 to cancel): ").strip().lower()
+            if value in ("q", "0"):
+                print("Upgrade cancelled.")
+                raise SystemExit(0)
+            choice = int(value)
+            if 1 <= choice <= len(devices):
+                return devices[choice - 1][0]
+        except ValueError:
+            pass
+        print(f"Please enter a number from 1 to {len(devices)}.")
+
+
+async def scan_command(timeout: float, name_prefix: str | None = None):
+    devices = await discover_devices(timeout)
+    if name_prefix:
+        prefix_l = name_prefix.lower()
+        devices = [(device, rssi) for device, rssi in devices
+                   if (device.name or "").lower().startswith(prefix_l)]
+    if devices:
+        print_devices(devices)
+    else:
+        print("No BLE devices found.")
 
 
 async def read_after(client: BleakClient, char, delay: float) -> bytes:
@@ -136,18 +190,31 @@ async def run(args: argparse.Namespace) -> None:
     if args.image.suffix.lower() in (".hex", ".ihex"):
         print(f"Converting Intel HEX: {args.image}", flush=True)
     image = load_image(args.image)
-    device = await find_device(args.device)
+    device = (await find_device(args.device, args.scan_timeout, args.name_prefix)
+              if args.device else await select_device(args.scan_timeout, args.name_prefix))
     print(f"Connecting to {device.name or '<unnamed>'} ({device.address})")
+    started = time.perf_counter()
     await upload(device, image, args.start_address, args.timeout)
+    print(f"OTA complete, elapsed: {time.perf_counter() - started:.1f}s")
 
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("image", type=Path, help=".bin image or Intel HEX file (bootloader prefix is preserved)")
-    p.add_argument("--device", required=True, help="BLE name or address substring")
+    p.add_argument("image", type=Path, nargs="?", help=".bin image or Intel HEX file (bootloader prefix is preserved)")
+    p.add_argument("--device", help="BLE name or address substring")
     p.add_argument("--start-address", type=lambda x: int(x, 0), default=START_ADDR)
     p.add_argument("--timeout", type=float, default=20.0)
+    p.add_argument("--scan-timeout", type=float, default=DEFAULT_SCAN_TIMEOUT,
+                   help="maximum BLE scan time in seconds (default: 8)")
+    p.add_argument("--name-prefix", help="only use devices whose name starts with this prefix")
     args = p.parse_args()
+    if args.scan_timeout <= 0:
+        p.error("--scan-timeout must be greater than zero")
+    if len(sys.argv) > 1 and sys.argv[1].lower() == "scan":
+        asyncio.run(scan_command(args.scan_timeout, args.name_prefix))
+        return 0
+    if args.image is None:
+        p.error("the following arguments are required: image")
     asyncio.run(run(args))
     return 0
 
