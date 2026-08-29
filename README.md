@@ -30,6 +30,8 @@ Characteristic: 0000FEE1-0000-1000-8000-00805F9B34FB
 - 页面必须运行在安全上下文：HTTPS 或本机 `localhost`
 - macOS、Windows、Linux 的 Web Bluetooth 支持情况取决于浏览器和系统蓝牙权限
 
+在线 Demo：<https://sintrb.github.io/WCHOTA/WCHWebOTA.html>
+
 ### Python 版本
 
 - Python 3.10+
@@ -52,7 +54,7 @@ python -m pip install bleak
 也可以通过 URL 自动下载固件：
 
 ```text
-WCHWebOTA.html?file=https://example.com/firmware/BackupUpgrade_OTA.hex
+WCHWebOTA.html?file=https://xxx.com/firmware/BackupUpgrade_OTA.hex
 ```
 
 页面会根据文件名后缀自动识别 HEX 或 BIN。远程服务器必须允许跨域访问，例如 Nginx：
