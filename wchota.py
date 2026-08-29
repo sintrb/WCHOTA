@@ -18,7 +18,7 @@ from pathlib import Path
 from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
 
-from hex_to_ota_bin import parse_hex
+from hex_to_bin import parse_hex
 
 SERVICE_UUID = "0000fee0-0000-1000-8000-00805f9b34fb"
 CHAR_UUID = "0000fee1-0000-1000-8000-00805f9b34fb"

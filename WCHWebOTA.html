@@ -392,6 +392,7 @@
 			var eraseReturn = new Uint8Array((await otaServiceRW.readValue()).buffer);
 			if(!eraseReturn.length || eraseReturn[0] !== 0){ alert('清除失败'); isStart = 0; return; }
 			document.getElementById('eraseReturn').innerText = '100 %';
+			document.getElementById('finish').innerText = '20 %';
 			for(var opcode of [0x80, 0x82]){
 				var offset = 0, element = opcode === 0x80 ? 'writeFlash' : 'verifyFlash';
 				while(offset < total){
@@ -401,7 +402,10 @@
 					packet.set(realFileArray.slice(offset, offset + length), 4);
 					await otaServiceRW.writeValue(packet);
 					offset += length;
-					document.getElementById(element).innerText = Math.round(offset / total * 100) + ' %';
+					var stagePercent = Math.round(offset / total * 100);
+					document.getElementById(element).innerText = stagePercent + ' %';
+					var progress = opcode === 0x80 ? 20 + stagePercent * 0.4 : 60 + stagePercent * 0.4;
+					document.getElementById('finish').innerText = Math.round(progress) + ' %';
 				}
 			}
 			document.getElementById('finish').innerText = '95 %';
